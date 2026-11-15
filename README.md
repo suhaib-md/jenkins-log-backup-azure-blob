@@ -6,14 +6,13 @@ This project provides an automated solution for backing up Jenkins build logs to
 
 ## Features
 
-✅ **Jenkins API Integration** - Secure authentication with Jenkins API  
-✅ **Azure Blob Storage Upload** - Robust error handling and retry mechanisms  
-✅ **Configurable Retention Policies** - Flexible log retention management  
-✅ **Batch Processing** - Efficient handling of multiple builds  
-✅ **Comprehensive Logging** - Detailed monitoring and audit trails  
-✅ **Multiple Log Format Support** - Console logs, test results, and artifacts  
-✅ **Automated Scheduling** - Cron job and systemd service integration  
-✅ **Cost Optimization** - Storage tier management and compression  
+✅ **Jenkins API integration** - lists jobs and builds and downloads console logs over the REST API (username + API token)
+✅ **Azure Blob Storage upload** - date-partitioned blob paths with build metadata attached
+✅ **Idempotent runs** - builds whose blob already exists are skipped, so it is safe to run on a schedule
+✅ **Time window and job selection** - `--days`, `--job` and `--filter`
+✅ **Config file or environment variables** - `config.json`, falling back to env vars
+✅ **Logging** - to stdout and `jenkins_backup.log`
+✅ **Schedulable** - designed to run from cron or a systemd timer
 
 ## Architecture
 
@@ -82,16 +81,9 @@ az storage account keys list \
   --resource-group jenkins-logs-rg
 ```
 
-#### Create Service Principal (Recommended for Production)
-```bash
-# Create service principal
-az ad sp create-for-rbac \
-  --name jenkins-logs-uploader \
-  --role "Storage Blob Data Contributor" \
-  --scopes /subscriptions/{subscription-id}/resourceGroups/jenkins-logs-rg
-
-# Note down the output: appId, password, tenant
-```
+> **Auth note:** the script authenticates to Azure with a storage account **connection string**.
+> Azure AD / service-principal auth (e.g. `DefaultAzureCredential` with the
+> *Storage Blob Data Contributor* role) is not implemented yet. It would be the preferred option for production.
 
 ### 2. Jenkins API Configuration
 
@@ -105,10 +97,10 @@ az ad sp create-for-rbac \
 #### Test Jenkins API Access
 ```bash
 # Test Jenkins API connection
-curl -u admin:your_api_token http://localhost:8080/api/json
+curl -u "$JENKINS_USERNAME:$JENKINS_API_TOKEN" http://localhost:8080/api/json
 
 # Test specific job access
-curl -u admin:your_api_token \
+curl -u "$JENKINS_USERNAME:$JENKINS_API_TOKEN" \
   http://localhost:8080/job/your-job-name/api/json
 ```
 
@@ -119,9 +111,11 @@ curl -u admin:your_api_token \
 # Make setup script executable
 chmod +x setup.sh
 
-# Run setup script
+# Run setup script from the repository folder
 ./setup.sh
 ```
+
+`setup.sh` targets Debian/Ubuntu (including WSL). It installs Python, creates `~/jenkins-backup` with a virtualenv, and installs `requirements.txt` there.
 
 #### Manual Setup
 ```bash
@@ -142,16 +136,24 @@ chmod +x jenkins_log_backup.py
 
 ## Configuration
 
+Copy one of the templates and fill it in. `config.json` and `.env` are gitignored.
+
+```bash
+cp config.example.json config.json   # or: cp .env.example .env && set -a && . ./.env && set +a
+```
+
+The script reads `config.json` (or the file given with `--config`). **Environment variables are used only if that file does not exist.**
+
 ### Configuration File (config.json)
 ```json
 {
   "jenkins": {
     "url": "http://localhost:8080",
     "username": "your_jenkins_username",
-    "api_token": "your_jenkins_api_token"
+    "api_token": "<your-jenkins-api-token>"
   },
   "azure": {
-    "connection_string": "DefaultEndpointsProtocol=https;AccountName=...",
+    "connection_string": "<your-storage-account-connection-string>",
     "container_name": "jenkins-build-logs"
   }
 }
@@ -161,8 +163,8 @@ chmod +x jenkins_log_backup.py
 ```bash
 export JENKINS_URL="http://localhost:8080"
 export JENKINS_USERNAME="admin"
-export JENKINS_API_TOKEN="your_api_token"
-export AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;..."
+export JENKINS_API_TOKEN="<your-jenkins-api-token>"
+export AZURE_STORAGE_CONNECTION_STRING="<your-storage-account-connection-string>"
 export AZURE_CONTAINER_NAME="jenkins-build-logs"
 ```
 
@@ -216,15 +218,6 @@ python3 jenkins_log_backup.py --help
 python3 jenkins_log_backup.py --job "your-job-name" --days 1
 ```
 
-#### Multiple Log Types
-```bash
-# Console logs only
-python3 jenkins_log_backup.py --job "my-job" --log-types console
-
-# Include test results and artifacts
-python3 jenkins_log_backup.py --job "my-job" --log-types console,test-results,artifacts
-```
-
 ### Command Line Options
 
 | Option | Description | Default |
@@ -237,7 +230,7 @@ python3 jenkins_log_backup.py --job "my-job" --log-types console,test-results,ar
 
 ## Azure Blob Storage Structure
 
-Logs are organized hierarchically in Azure Blob Storage:
+Blobs are named `<job>/<YYYY>/<MM>/<DD>/<job>-<build>-<YYYYMMDD-HHMMSS>.log`, using the build's start time:
 
 ```
 jenkins-build-logs/
@@ -245,8 +238,8 @@ jenkins-build-logs/
 │   ├── 2024/
 │   │   ├── 01/
 │   │   │   ├── 15/
-│   │   │   │   ├── job-name-1_123_20240115143022.log
-│   │   │   │   └── job-name-1_124_20240115150145.log
+│   │   │   │   ├── job-name-1-123-20240115-143022.log
+│   │   │   │   └── job-name-1-124-20240115-150145.log
 │   │   │   └── 16/
 │   │   └── 02/
 │   └── 2025/
@@ -273,9 +266,6 @@ crontab -e
 
 # Daily backup at 2 AM
 0 2 * * * cd /home/ubuntu/jenkins-backup && ./venv/bin/python jenkins_log_backup.py >> /var/log/jenkins-backup.log 2>&1
-
-# Weekly cleanup (older than 30 days)
-0 3 * * 0 cd /home/ubuntu/jenkins-backup && ./venv/bin/python jenkins_log_backup.py --cleanup --older-than 30
 ```
 
 ### 2. Systemd Service (Alternative)
@@ -302,21 +292,6 @@ tail -f jenkins_backup.log
 
 # Check for errors
 grep ERROR jenkins_backup.log
-
-# Monitor upload statistics
-python3 jenkins_log_backup.py --stats
-```
-
-### Health Checks
-```bash
-# Check service status
-python3 jenkins_log_backup.py --health-check
-
-# Verify Azure connectivity
-python3 jenkins_log_backup.py --test-azure
-
-# Check storage usage
-python3 jenkins_log_backup.py --storage-info
 ```
 
 ### Common Issues & Solutions
@@ -324,19 +299,13 @@ python3 jenkins_log_backup.py --storage-info
 #### Jenkins API Authentication Failed
 ```bash
 # Verify credentials
-curl -u username:token http://localhost:8080/api/json
+curl -u "$JENKINS_USERNAME:$JENKINS_API_TOKEN" http://localhost:8080/api/json
 ```
 
 #### Azure Blob Upload Failed
 ```bash
 # Check network connectivity
 az storage blob list --container-name jenkins-build-logs --account-name jenkinslogsstorage
-```
-
-#### Large Log Files
-```bash
-# Enable compression
-python3 jenkins_log_backup.py --job "job-name" --compress --chunk-size 10MB
 ```
 
 ## Best Practices
@@ -379,8 +348,10 @@ python3 jenkins_log_backup.py --job "job-name" --compress --chunk-size 10MB
 
 ## Compliance & Governance
 
+These are recommendations for running this in production. The script itself only uploads.
+
 ### Retention Policies
-- Implement automated retention policies
+- Use Azure Blob **lifecycle management** rules to move logs to Cool/Archive and delete them after N days
 - Support for legal hold requirements
 - Audit trail for log access
 - Data classification and tagging
@@ -397,7 +368,8 @@ python3 jenkins_log_backup.py --job "job-name" --compress --chunk-size 10MB
 jenkins-backup/
 ├── jenkins_log_backup.py     # Main backup script
 ├── requirements.txt          # Python dependencies
-├── config.json              # Configuration file
+├── config.example.json      # Config template (copy to config.json, gitignored)
+├── .env.example             # Env-var template (copy to .env, gitignored)
 ├── setup.sh                 # Environment setup script
 ├── README.md                # This file
 ├── logs/                    # Local log files
@@ -418,7 +390,7 @@ This project includes all required deliverables:
 1. **✅ Script File** - `jenkins_log_backup.py` (Python-based)
 2. **✅ Requirements File** - `requirements.txt` with all dependencies
 3. **✅ Setup Script** - `setup.sh` for automated environment setup
-4. **✅ Configuration** - `config.json` with Jenkins API authentication and Azure Blob upload settings
+4. **✅ Configuration** - `config.example.json` / `.env.example` templates for Jenkins API authentication and Azure Blob upload settings
 5. **✅ Documentation** - This comprehensive README.md with:
    - Complete setup instructions
    - Usage examples
@@ -436,7 +408,7 @@ This project includes all required deliverables:
 
 ## License
 
-This project is licensed under the MIT License. See LICENSE file for details.
+No license file has been added yet, so all rights are reserved by default.
 
 ## Support
 
@@ -449,4 +421,4 @@ For issues and questions:
 
 ---
 
-**Note**: This solution is designed for production use with proper error handling, logging, and security considerations. Always test in a development environment before deploying to production.
+**Note**: This is a lab/learning project. See the auth note and the recommendations above before relying on it in production.
