@@ -5,6 +5,8 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 echo "🚀 Setting up Jenkins Log Backup to Azure..."
 
 # Update system packages
@@ -29,9 +31,10 @@ source venv/bin/activate
 # Install Python dependencies
 echo "📚 Installing Python dependencies..."
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r "$SCRIPT_DIR/requirements.txt"
 
 # Make script executable
+cp "$SCRIPT_DIR/jenkins_log_backup.py" "$SCRIPT_DIR/config.example.json" .
 chmod +x jenkins_log_backup.py
 
 # Create logs directory
@@ -40,7 +43,7 @@ mkdir -p logs
 echo "✅ Setup completed successfully!"
 echo ""
 echo "📋 Next steps:"
-echo "1. Edit config.json with your Jenkins and Azure credentials"
+echo "1. cp config.example.json config.json and fill in your Jenkins and Azure credentials"
 echo "2. Activate virtual environment: source $PROJECT_DIR/venv/bin/activate"
 echo "3. Test the script: python3 jenkins_log_backup.py --help"
 echo ""
