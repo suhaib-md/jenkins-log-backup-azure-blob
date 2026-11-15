@@ -1,0 +1,11 @@
+{
+  "jenkins": {
+    "url": "http://localhost:8080",
+    "username": "<your-jenkins-username>",
+    "api_token": "<your-jenkins-api-token>"
+  },
+  "azure": {
+    "connection_string": "<your-storage-account-connection-string>",
+    "container_name": "jenkins-build-logs"
+  }
+}
